@@ -7,16 +7,17 @@ app.use(bodyParser.json());
 
 // ---------------- REDIS SETUP ----------------
 const redisClient = createClient();
-redisClient.connect();
+redisClient.connect().catch(err => console.error("❌ Redis Connection Error", err));
 
 redisClient.on("connect", () => {
   console.log("✅ Redis connected");
 });
 
-// ---------------- VALIDATION FUNCTION ----------------
+// ---------------- UPGRADED VALIDATION ----------------
 function validateLog(log) {
   const requiredFields = [
     "service",
+    "container_id", // NEW: Required for Micro-Isolation
     "level",
     "response_time",
     "timestamp",
@@ -29,11 +30,23 @@ function validateLog(log) {
     }
   }
 
+  // 1. Service & Container Validation
   if (typeof log.service !== "string") return "service must be string";
-  if (!["INFO", "ERROR"].includes(log.level)) return "invalid log level";
+  if (typeof log.container_id !== "string") return "container_id must be string";
+
+  // 2. Log Level Expansion (Now accepts WARN/WARNING)
+  const validLevels = ["INFO", "WARN", "WARNING", "ERROR"];
+  if (!validLevels.includes(log.level)) {
+    return `invalid log level: ${log.level}. Must be one of ${validLevels.join(", ")}`;
+  }
+
+  // 3. Metric Types
   if (typeof log.response_time !== "number") return "response_time must be number";
-  if (typeof log.timestamp !== "number") return "timestamp must be number";
-  if (typeof log.request_id !== "string") return "request_id must be string";
+  
+  // Accept both Unix numbers and ISO strings for flexibility
+  if (typeof log.timestamp !== "number" && typeof log.timestamp !== "string") {
+      return "timestamp must be number or ISO string";
+  }
 
   return null; // valid
 }
@@ -41,24 +54,37 @@ function validateLog(log) {
 // ---------------- LOG INGEST API ----------------
 app.post("/logs", async (req, res) => {
   const log = req.body;
-
   const error = validateLog(log);
   if (error) {
+    console.warn(`⚠️ Rejected log from ${log.service || 'unknown'}: ${error}`);
     return res.status(400).json({
       status: "REJECTED",
       reason: error
     });
   }
 
-  // push valid log to Redis list
-  await redisClient.lPush("LOG_STREAM", JSON.stringify(log));
+  try {
+    // Push valid log to Redis list
+    // The Python Analyzer is waiting for this via r.brpop("LOG_STREAM")
+    await redisClient.lPush("LOG_STREAM", JSON.stringify(log));
 
-  return res.status(200).json({
-    status: "ACCEPTED"
-  });
+    return res.status(200).json({
+      status: "ACCEPTED"
+    });
+  } catch (dbError) {
+    console.error("❌ Redis Push Failed", dbError);
+    return res.status(500).json({ status: "ERROR", reason: "Internal Buffer Full" });
+  }
+});
+
+// ---------------- HEALTH CHECK (For the System) ----------------
+app.get("/health", (req, res) => {
+    res.status(200).send("Collector is Alive");
 });
 
 // ---------------- START SERVER ----------------
-app.listen(5000, () => {
-  console.log("🚀 Log Collector running on port 5000");
+const PORT = 5001;
+app.listen(PORT, () => {
+  console.log(`🚀 Log Collector Gateway running on port ${PORT}`);
+  console.log(`📡 Ingesting logs for the Predictive ML Engine...`);
 });

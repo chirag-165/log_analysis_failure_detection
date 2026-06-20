@@ -181,7 +181,7 @@ Modern microservice systems generate huge volumes of logs, and most monitoring i
 
    `processor/.env`:
    ```
-   MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/predictive_system
+   MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/log_analysis_dashboard
    REDIS_HOST=redis
    REDIS_PORT=6379
    MODEL_PATH=failure_model_v2.pkl
@@ -189,7 +189,7 @@ Modern microservice systems generate huge volumes of logs, and most monitoring i
 
    `controller/.env`:
    ```
-   MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/predictive_system
+   MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/log_analysis_dashboard
    RECONCILE_INTERVAL_SEC=5
    AGENT_TIMEOUT_SEC=10
    AGENT_PORT=8000

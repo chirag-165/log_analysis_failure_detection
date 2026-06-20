@@ -24,7 +24,7 @@ AGENT_PORT = int(os.getenv("AGENT_PORT", "8000"))
 
 
 class PolicyEngine:
-    def __init__(self, mongo_uri=None, db_name="predictive_system"):
+    def __init__(self, mongo_uri=None, db_name="log_analysis_dashboard"):
         mongo_uri = mongo_uri or os.getenv("MONGO_URI")
         if not mongo_uri:
             raise ValueError("MONGO_URI is required for PolicyEngine")
@@ -94,7 +94,7 @@ class PolicyEngine:
             "action": action,
             "target_container": target_container,
             "host_ip": host_ip,
-            "agent_url": f"http://{host_ip}:{AGENT_PORT}" if host_ip else None,
+            "agent_url": f"http://agent:{AGENT_PORT}" if host_ip else None,
             "status": status,  # PENDING | SUCCESS | FAILED | SKIPPED
             "created_at": datetime.now(timezone.utc),
             "executed_at": None,

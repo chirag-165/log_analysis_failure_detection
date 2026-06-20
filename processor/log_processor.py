@@ -68,7 +68,7 @@ SERVICE_MAP = {
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["predictive_system"]
+db = mongo_client["log_analysis_dashboard"]
 window_collection = db["window_history"]
 window_collection.create_index("timestamp", expireAfterSeconds=86400)
 
@@ -203,10 +203,14 @@ class PredictiveAnalyzer:
         anomaly_count = sum([lat_anom, we_anom, warn_anom, traffic_anom])
 
         one_hot = SERVICE_MAP[service]
+        # NOTE: keys here must exactly match the training dataset's column
+        # names (is_auth / is_order / is_payment, no "-service" suffix) or
+        # the padding loop below will silently zero-fill all three every
+        # time, meaning the model never actually sees service identity.
         feature_dict = {
-            "is_auth-service": one_hot[0],
-            "is_order-service": one_hot[1],
-            "is_payment-service": one_hot[2],
+            "is_auth": one_hot[0],
+            "is_order": one_hot[1],
+            "is_payment": one_hot[2],
             "z_latency": z_lat,
             "z_errors": z_we,
             "z_warns": z_warn,

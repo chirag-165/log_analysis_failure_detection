@@ -1,12 +1,14 @@
 import express from "express";
 import bodyParser from "body-parser";
+import dotenv from "dotenv";
 import { createClient } from "redis";
 
+dotenv.config();
 const app = express();
 app.use(bodyParser.json());
 
 // ---------------- REDIS SETUP ----------------
-const redisClient = createClient();
+const redisClient = createClient({url: process.env.REDIS_URL || "redis://redis:6379"});
 redisClient.connect().catch(err => console.error("❌ Redis Connection Error", err));
 
 redisClient.on("connect", () => {
@@ -18,6 +20,8 @@ function validateLog(log) {
   const requiredFields = [
     "service",
     "container_id", // NEW: Required for Micro-Isolation
+    "hostname",
+    "host_ip", // NEW: Required for Micro-Isolation
     "level",
     "response_time",
     "timestamp",
@@ -33,6 +37,8 @@ function validateLog(log) {
   // 1. Service & Container Validation
   if (typeof log.service !== "string") return "service must be string";
   if (typeof log.container_id !== "string") return "container_id must be string";
+  if (typeof log.hostname !== "string") return "hostname must be string";
+  if (typeof log.host_ip !== "string") return "host_ip must be string";
 
   // 2. Log Level Expansion (Now accepts WARN/WARNING)
   const validLevels = ["INFO", "WARN", "WARNING", "ERROR"];

@@ -1,0 +1,114 @@
+version: '3.8'
+
+services:
+ redis:
+    image: redis:latest
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - monitoring
+
+ auth-service:
+    build: ./service
+    labels:
+      service: "auth-service"
+    restart: unless-stopped
+    environment:
+      - SERVICE_NAME=auth-service
+      - HOST_IP=127.0.0.1   
+      - COLLECTOR_URL=http://collector:5001/logs
+    depends_on:
+      - collector
+    networks:
+      - monitoring
+
+ order-service:
+    build: ./service
+    labels:
+      service: "order-service"    
+    restart: unless-stopped
+    environment:
+      - SERVICE_NAME=order-service
+      - HOST_IP=127.0.0.1 
+      - COLLECTOR_URL=http://collector:5001/logs
+    depends_on:
+      - collector
+    networks:
+      - monitoring
+
+ payment-service:
+    build: ./service
+    labels:
+      service: "payment-service"  
+    restart: unless-stopped
+    environment:
+      - SERVICE_NAME=payment-service
+      - HOST_IP=127.0.0.1
+      - COLLECTOR_URL=http://collector:5001/logs
+    depends_on:
+      - collector
+    networks:
+      - monitoring
+
+ collector:
+    build: ./collector
+    container_name: collector
+    restart: unless-stopped
+    depends_on:
+      - redis
+    ports:
+      - "5001:5001"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PORT=5001
+    networks:
+      - monitoring
+
+ processor:
+    build: ./processor
+    container_name: processor
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      - MONGO_URI=MONGODB_URI
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - monitoring
+
+ agent:
+    build: ./agent
+    container_name: agent
+    environment:
+      HOST_IP: 127.0.0.1     # on EC2: the instance's private IP
+    networks:
+      - monitoring
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+ controller:
+    build: ./controller
+    container_name: controller
+    env_file: ./controller/.env
+    networks:
+      - monitoring
+    depends_on: 
+      - agent
+    restart: unless-stopped
+
+networks:
+  monitoring:
+    driver: bridge
+
+
+
+

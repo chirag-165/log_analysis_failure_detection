@@ -1,5 +1,5 @@
 version: '3.8'
-
+name: log-analysis
 services:
  redis:
     image: redis:latest

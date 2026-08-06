@@ -73,10 +73,7 @@ services:
     restart: unless-stopped
     depends_on:
       - redis
-    environment:
-      - MONGO_URI=MONGODB_URI
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+    env_file: ./processor/.env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:

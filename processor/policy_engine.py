@@ -19,7 +19,7 @@ from pymongo import MongoClient
 
 logger = logging.getLogger(__name__)
 
-SCALE_TRAFFIC_DELTA_THRESHOLD = 0.7
+SCALE_TRAFFIC_DELTA_THRESHOLD = 0.6
 AGENT_PORT = int(os.getenv("AGENT_PORT", "8000"))
 
 

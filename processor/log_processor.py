@@ -227,7 +227,7 @@ class PredictiveAnalyzer:
         prob = float(ml_model.predict_proba(feature_df)[0][1])
 
         # ---------------- HYBRID RISK (rule override + ML) ----------------
-        if weighted_error_rate > 0.20 or prob >= ml_threshold or anomaly_count >= 2:
+        if weighted_error_rate > 0.20 or prob >= ml_threshold or anomaly_count >= 1:
             risk = "HIGH"
         elif prob > MEDIUM_RISK_PROB_THRESHOLD or anomaly_count == 1:
             risk = "MEDIUM"

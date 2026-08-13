@@ -1,4 +1,5 @@
 import os from "os";
+import http from "http";
 import axios from "axios";
 import { v4 as uuidv4 } from "uuid";
 import dotenv from "dotenv";
@@ -12,6 +13,12 @@ const HOSTNAME = os.hostname();
 const CONTAINER_ID =
   process.env.CONTAINER_ID || process.argv[3] || HOSTNAME;
 const COLLECTOR_URL = process.env.COLLECTOR_URL || "http://localhost:5001/logs";
+
+// Port for the fault-injection API.
+// Override via INJECTION_API_PORT env var if needed.
+// Does NOT conflict with Collector (5001), agent (8000),
+// dashboard-backend (5000), or dashboard-frontend (5173).
+const INJECTION_API_PORT = parseInt(process.env.INJECTION_API_PORT ?? "5002", 10);
 
 async function resolveHostIp() {
   // Tier 1: EC2 metadata service (IMDSv2 - token-based)
@@ -51,6 +58,8 @@ async function resolveHostIp() {
 }
 
 // ---------------- CHAOS STATE ----------------
+// These are the same variables the keyboard controls already use.
+// The injection API writes to them directly — no duplicate mechanism.
 let FAILURE_MODE = false;
 let LATENCY_SPIKE = false;
 
@@ -102,7 +111,120 @@ async function sendLog(hostIp) {
   }
 }
 
+// ---------------- FAULT INJECTION API ----------------
+// Minimal HTTP server using Node's built-in `http` module — zero new
+// dependencies. Runs on INJECTION_API_PORT (default 5002).
+//
+// Endpoints:
+//
+//   POST /inject/failure
+//     Body (JSON, all fields optional):
+//       { "failure_mode": true|false, "latency_spike": true|false }
+//     Omitting a field leaves that mode unchanged.
+//     Example — enable both:   {"failure_mode": true, "latency_spike": true}
+//     Example — disable both:  {"failure_mode": false, "latency_spike": false}
+//     Example — toggle only errors: {"failure_mode": true}
+//
+//   GET /inject/state
+//     Returns current fault-injection state, no side effects.
+//
+// Both endpoints return the same JSON shape:
+//   {
+//     "service": "auth-service",
+//     "container_id": "auth-service",
+//     "failure_mode": false,
+//     "latency_spike": false,
+//     "effects": {
+//       "error_rate": "~30% (30% ERROR, 20% WARN) [ACTIVE]" | "~2% (normal)",
+//       "latency_added_ms": "1000–3000ms extra [ACTIVE]" | "none"
+//     }
+//   }
+
+function stateResponse() {
+  return JSON.stringify({
+    service: SERVICE_NAME,
+    container_id: CONTAINER_ID,
+    failure_mode: FAILURE_MODE,
+    latency_spike: LATENCY_SPIKE,
+    effects: {
+      error_rate: FAILURE_MODE
+        ? "~30% ERROR / 20% WARN + 400ms base latency [ACTIVE]"
+        : "~2% ERROR / 3% WARN (normal)",
+      latency_added_ms: LATENCY_SPIKE
+        ? "1000–3000ms extra [ACTIVE]"
+        : "none",
+    },
+  }, null, 2);
+}
+
+function startInjectionApi() {
+  const server = http.createServer((req, res) => {
+    const { method, url } = req;
+
+    // ── GET /inject/state ─────────────────────────────────────────────
+    if (method === "GET" && url === "/inject/state") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(stateResponse());
+      return;
+    }
+
+    // ── POST /inject/failure ──────────────────────────────────────────
+    if (method === "POST" && url === "/inject/failure") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        try {
+          const payload = body.trim() ? JSON.parse(body) : {};
+
+          // Only update modes that were explicitly provided in the request.
+          // Omitting a key leaves the current value untouched.
+          if (typeof payload.failure_mode === "boolean") {
+            FAILURE_MODE = payload.failure_mode;
+            console.log(`🌐 API → FAILURE_MODE: ${FAILURE_MODE ? "ON" : "OFF"}`);
+          }
+          if (typeof payload.latency_spike === "boolean") {
+            LATENCY_SPIKE = payload.latency_spike;
+            console.log(`🌐 API → LATENCY_SPIKE: ${LATENCY_SPIKE ? "ON" : "OFF"}`);
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(stateResponse());
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        }
+      });
+      return;
+    }
+
+    // ── 404 for anything else ─────────────────────────────────────────
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      error: "Not found",
+      available: [
+        "GET  /inject/state",
+        "POST /inject/failure  body: {failure_mode?: bool, latency_spike?: bool}",
+      ],
+    }));
+  });
+
+  server.listen(INJECTION_API_PORT, () => {
+    console.log(
+      `🔧 Fault injection API: http://localhost:${INJECTION_API_PORT}`
+    );
+    console.log(`   GET  /inject/state`);
+    console.log(`   POST /inject/failure  {"failure_mode":true,"latency_spike":true}`);
+  });
+
+  // Non-fatal: if the port is already in use, log and continue
+  server.on("error", (err) => {
+    console.error(`⚠️  Injection API failed to start on ${INJECTION_API_PORT}: ${err.message}`);
+    console.error(`   Keyboard controls still work. Set INJECTION_API_PORT env var to use a different port.`);
+  });
+}
+
 // ---------------- LIVE CONTROLS ----------------
+// Keyboard controls unchanged — still work when running attached (npm start / docker attach)
 function setupKeyboardControls() {
   if (!process.stdin.isTTY) return;
 
@@ -141,6 +263,7 @@ async function main() {
 
   console.log(`🚀 Starting ${SERVICE_NAME} | container_id=${CONTAINER_ID} | host_ip=${hostIp}`);
   setupKeyboardControls();
+  startInjectionApi();
 
   const interval = Math.floor(Math.random() * 500) + 500; // 500-1000ms jitter
   logIntervalHandle = setInterval(() => sendLog(hostIp), interval);

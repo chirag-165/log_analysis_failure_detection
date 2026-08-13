@@ -13,6 +13,8 @@ services:
 
  auth-service:
     build: ./service
+    ports:
+      - "5002:5002"
     labels:
       service: "auth-service"
     restart: unless-stopped
@@ -27,6 +29,8 @@ services:
 
  order-service:
     build: ./service
+    ports:
+      - "5003:5002"
     labels:
       service: "order-service"    
     restart: unless-stopped
@@ -41,6 +45,8 @@ services:
 
  payment-service:
     build: ./service
+    ports:
+      - "5004:5002"
     labels:
       service: "payment-service"  
     restart: unless-stopped

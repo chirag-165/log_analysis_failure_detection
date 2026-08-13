@@ -79,7 +79,7 @@ COOLDOWN_SEC    = int(os.getenv("COOLDOWN_SEC", "120"))
 
 # ── Detection thresholds ───────────────────────────────────────────────────
 # FIX: 2.5 not 2.0 — must match generate_dataset.py exactly
-SENSITIVITY_K         = float(os.getenv("SENSITIVITY_K", "2.5"))
+SENSITIVITY_K         = float(os.getenv("SENSITIVITY_K", "2.75"))
 TRAFFIC_ANOMALY_THR   = float(os.getenv("TRAFFIC_ANOMALY_THR", "1.5"))
 
 # Hybrid rule thresholds (raw values, not Z-scores)
@@ -94,7 +94,7 @@ TRAFFIC_CRASH_THR     = float(os.getenv("TRAFFIC_CRASH_THR", "-1.5"))
 # Traffic overload: sudden large spike
 TRAFFIC_SPIKE_THR     = float(os.getenv("TRAFFIC_SPIKE_THR", "2.0"))
 
-MEDIUM_PROB_THR       = float(os.getenv("MEDIUM_PROB_THR", "0.20"))
+MEDIUM_PROB_THR       = float(os.getenv("MEDIUM_PROB_THR", "0.40"))
 EPS                   = 1e-6
 
 # Scale-down: how many consecutive LOW windows before restoring to 1 replica
@@ -119,7 +119,8 @@ with open(MODEL_PATH, "rb") as f:
     model_data    = pickle.load(f)
     ml_model      = model_data["model"]
     feature_names = model_data["features"]
-    ml_threshold  = model_data.get("threshold", 0.4)
+    # ml_threshold  = model_data.get("threshold", 0.4)
+    ml_threshold  = 0.7
 
 logger.info(
     "ML model loaded | threshold=%.3f | features=%s",
@@ -293,7 +294,7 @@ class PredictiveAnalyzer:
         # ── Hybrid risk classification ────────────────────────────────────
         #
         # Signal A — ML model (primary predictor)
-        ml_high = ml_prob >= ml_threshold
+        ml_high = (ml_prob >= ml_threshold and anomaly_count >= 1 and not traffic_anom)  # require at least one anomaly to avoid false positives
 
         # Signal B — Statistical: 2+ simultaneous Z-score anomalies
         stat_high = anomaly_count >= 2
@@ -356,7 +357,7 @@ class PredictiveAnalyzer:
         # HIGH/MEDIUM/COOLDOWN windows are excluded.
         # This is the most important fix: persistent failures stay detectable
         # because abnormal values never shift the rolling mean.
-        if effective_risk == "LOW":
+        if effective_risk == "LOW" or effective_risk == "MEDIUM":
             self.window_history[service].append({
                 "latency":      p95_latency,
                 "weighted_err": weighted_error_rate,

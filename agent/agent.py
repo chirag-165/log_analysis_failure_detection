@@ -60,6 +60,7 @@ def health():
         raise HTTPException(503, f"Docker daemon unreachable: {e}")
 
 
+
 @app.post("/restart/{container_name}")
 def restart_container(container_name: str):
     try:

@@ -45,6 +45,17 @@ def agent_url_for(host_ip):
 def execute_restart(agent_url, service, target_container):
     if not target_container or target_container == "unknown":
         target_container = service  # fall back to the service's primary container name
+        resp = requests.get(f"{agent_url}/containers/{service}", timeout=AGENT_TIMEOUT_SEC)
+        if resp.status_code == 200:
+            containers = resp.json().get("containers", [])
+            if containers:
+                for c in containers:
+                    requests.post(f"{agent_url}/restart/{c['id']}", timeout=AGENT_TIMEOUT_SEC)
+            else:
+                raise Exception(f"No containers found for service '{service}' on agent {agent_url}")
+            return {"status": "success", "action": "restart", "service": service, "host_ip": agent_url.split("//")[1].split(":")[0]}
+
+
     resp = requests.post(f"{agent_url}/restart/{target_container}", timeout=AGENT_TIMEOUT_SEC)
     resp.raise_for_status()
     return resp.json()
@@ -92,6 +103,9 @@ def process_pending_actions():
                 data = desired_state_col.find_one({"service": service})
                 desired_replicas = data["desired_replicas"] if data else 3
                 result = execute_scale(agent_url, service, desired_replicas, host_ip=host_ip)
+            elif action == "SCALE_DOWN":
+                mark(doc["_id"], "SUCCESS")
+                continue  # No action needed; desired_state already reflects the scale-down
             else:
                 logger.warning("Unknown action type '%s' for %s, skipping", action, service)
                 mark(doc["_id"], "FAILED", error="unknown action type")

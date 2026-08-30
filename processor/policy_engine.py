@@ -45,9 +45,9 @@ AGENT_PORT               = int(os.getenv("AGENT_PORT", "8000"))
 SCALE_UP_REPLICAS        = int(os.getenv("SCALE_UP_REPLICAS", "3"))
 SCALE_DOWN_REPLICAS      = int(os.getenv("SCALE_DOWN_REPLICAS", "1"))
 # Traffic delta above which scale-up preferred over restart
-SCALE_TRAFFIC_DELTA_THR  = float(os.getenv("SCALE_TRAFFIC_DELTA_THR", "0.6"))
+SCALE_TRAFFIC_DELTA_THR  = float(os.getenv("SCALE_TRAFFIC_DELTA_THR", "0.8"))
 # Consecutive LOW windows before scale-down fires
-SCALE_DOWN_STABLE_WIN    = int(os.getenv("SCALE_DOWN_STABLE_WIN", "3"))
+SCALE_DOWN_STABLE_WIN    = int(os.getenv("SCALE_DOWN_STABLE_WIN", "15"))
 # Repeated failure: if restarted N+ times recently, escalate to SCALE_UP
 REPEATED_FAILURE_N       = int(os.getenv("REPEATED_FAILURE_N", "3"))
 REPEATED_FAILURE_MIN     = int(os.getenv("REPEATED_FAILURE_MIN", "10"))
@@ -123,7 +123,7 @@ class PolicyEngine:
         )
         # Update desired_state immediately for drift-reconciliation
         self.desired_state.update_one(
-            {"service": service},
+            {"service": service, "host_ip": host_ip},
             {"$set": {
                 "desired_replicas": SCALE_DOWN_REPLICAS,
                 "updated_at":       datetime.now(timezone.utc),
@@ -222,14 +222,23 @@ class PolicyEngine:
         # Maintain desired_state for Controller drift-reconciliation
         if action == "SCALE_UP":
             self.desired_state.update_one(
-                {"service": service},
-                {"$set": {
-                    "desired_replicas": SCALE_UP_REPLICAS,
-                    "host_ip":          host_ip,
-                    "updated_at":       datetime.now(timezone.utc),
-                }},
-                upsert=True,
-            )
+            {
+                "service": service,
+                "host_ip": host_ip
+            },
+            {
+            "$set": {
+                "desired_replicas": SCALE_UP_REPLICAS,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$setOnInsert": {
+                "service": service,
+                "host_ip": host_ip,
+                "created_at": datetime.now(timezone.utc),
+            }
+            },
+        upsert=True
+    )
 
         logger.warning(
             "Action recorded: %s for %s [%s] id=%s",

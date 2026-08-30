@@ -89,6 +89,7 @@ ERROR_RATE_RULE_THR   = float(os.getenv("ERROR_RATE_RULE_THR", "0.15"))
 LATENCY_RULE_THR_MS   = float(os.getenv("LATENCY_RULE_THR_MS", "250.0"))
 # Sustained anomaly: fire HIGH after this many consecutive anomalous windows
 SUSTAINED_ANOMALY_WIN = int(os.getenv("SUSTAINED_ANOMALY_WIN", "6"))
+SUSTAINED_TRAFFIC_WIN = int(os.getenv("SUSTAINED_TRAFFIC_WIN", "3"))
 # Traffic crash: sudden large drop in requests = upstream crash
 TRAFFIC_CRASH_THR     = float(os.getenv("TRAFFIC_CRASH_THR", "-1.5"))
 # Traffic overload: sudden large spike
@@ -138,6 +139,7 @@ class PredictiveAnalyzer:
         self.last_known_host     = defaultdict(lambda: None)
         # Consecutive LOW-risk window counter per service (for scale-down)
         self.low_streak          = defaultdict(int)
+        self.traffic_delta_streak= defaultdict(int)
         # Consecutive anomalous window counter per service (for sustained detection)
         self.anomaly_streak      = defaultdict(int)
         self.policy_engine       = PolicyEngine(mongo_uri=MONGO_URI)
@@ -291,10 +293,17 @@ class PredictiveAnalyzer:
             self.anomaly_streak[service] = 0
         sustained_failure = self.anomaly_streak[service] >= SUSTAINED_ANOMALY_WIN
 
+        # if traffic_delta < TRAFFIC_CRASH_THR or traffic_delta > TRAFFIC_SPIKE_THR:
+        #     self.traffic_delta_streak[service] += 1
+        # else:
+        #     self.traffic_delta_streak[service] = 0
+
+        # sustained_traffic_anomaly = self.traffic_delta_streak[service] >= SUSTAINED_TRAFFIC_WIN
+
         # ── Hybrid risk classification ────────────────────────────────────
         #
         # Signal A — ML model (primary predictor)
-        ml_high = (ml_prob >= ml_threshold and anomaly_count >= 1 and not traffic_anom)  # require at least one anomaly to avoid false positives
+        ml_high = (ml_prob >= ml_threshold and anomaly_count >= 1)  # require at least one anomaly to avoid false positives
 
         # Signal B — Statistical: 2+ simultaneous Z-score anomalies
         stat_high = anomaly_count >= 2
@@ -313,6 +322,7 @@ class PredictiveAnalyzer:
             traffic_delta < TRAFFIC_CRASH_THR or
             traffic_delta > TRAFFIC_SPIKE_THR
         )
+        # rule_traffic = sustained_traffic_anomaly
 
         # Signal F — Sustained degradation across multiple windows
         rule_sustained = sustained_failure

@@ -109,6 +109,20 @@ services:
       - agent
     restart: unless-stopped
 
+ experiment-console:
+    build: ./experiment_console
+    container_name: experiment-console
+    ports:
+      - "6060:6060"
+    env_file: ./experiment_console/.env
+    networks:
+      - monitoring
+    depends_on:
+      - auth-service
+      - order-service
+      - payment-service
+    restart: unless-stopped
+
 networks:
   monitoring:
     driver: bridge

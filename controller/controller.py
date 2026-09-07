@@ -29,6 +29,59 @@ actions_col = db["recovery_actions"]
 desired_state_col = db["desired_state"]
 
 
+import smtplib
+from email.mime.text import MIMEText
+
+DEFAULT_ESCALATION_EMAIL = os.getenv("ESCALATION_EMAIL", "shettychirag16@gmail.com")
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASS = os.getenv("SMTP_PASS")
+
+
+def send_escalation_email(service, doc):
+    recipient = DEFAULT_ESCALATION_EMAIL
+    reason = doc.get("decision_reason", "Repeated service failure threshold exceeded")
+    host_ip = doc.get("host_ip", "unknown")
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    subject = f"🚨 [CRITICAL ALERT] On-Call Escalation Triggered for {service}"
+    body = f"""
+===================================================================
+CRITICAL ON-CALL ESCALATION ALERT
+===================================================================
+Service: {service}
+Host IP: {host_ip}
+Action: ESCALATE_ON_CALL
+Reason: {reason}
+Timestamp: {timestamp}
+
+The automated self-healing controller has escalated this incident because 
+repeated automated restarts/healing actions did not resolve the service failure.
+
+Please inspect the system dashboard and microservice health immediately.
+===================================================================
+"""
+    logger.warning("🚨 ESCALATION ALERT triggered for %s! Recipient: %s", service, recipient)
+
+    if SMTP_HOST and SMTP_USER and SMTP_PASS:
+        try:
+            msg = MIMEText(body)
+            msg["Subject"] = subject
+            msg["From"] = SMTP_USER
+            msg["To"] = recipient
+
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+                server.starttls()
+                server.login(SMTP_USER, SMTP_PASS)
+                server.sendmail(SMTP_USER, [recipient], msg.as_string())
+            logger.info("✅ Escalation email sent via SMTP to %s", recipient)
+        except Exception as err:
+            logger.error("⚠️ Failed to send SMTP escalation email to %s: %s", recipient, err)
+    else:
+        logger.info("📧 [ON-CALL EMAIL DISPATCH SIMULATION] To: %s | Subject: %s", recipient, subject)
+
+
 def mark(action_id, status, error=None):
     update = {"status": status, "executed_at": datetime.now(timezone.utc)}
     if error:
@@ -38,35 +91,54 @@ def mark(action_id, status, error=None):
 
 def agent_url_for(host_ip):
     if not host_ip:
-        return None
+        return f"http://agent:{AGENT_PORT}"
     return f"http://agent:{AGENT_PORT}"
 
 
+def get_working_agent_url(primary_url):
+    urls = [primary_url, f"http://localhost:{AGENT_PORT}"] if primary_url else [f"http://localhost:{AGENT_PORT}"]
+    for url in urls:
+        if not url:
+            continue
+        try:
+            resp = requests.get(f"{url}/health", timeout=2)
+            if resp.status_code == 200:
+                return url
+        except requests.exceptions.RequestException:
+            pass
+    return primary_url or f"http://agent:{AGENT_PORT}"
+
+
 def execute_restart(agent_url, service, target_container):
+    url = get_working_agent_url(agent_url)
     if not target_container or target_container == "unknown":
         target_container = service  # fall back to the service's primary container name
-        resp = requests.get(f"{agent_url}/containers/{service}", timeout=AGENT_TIMEOUT_SEC)
+        resp = requests.get(f"{url}/containers/{service}", timeout=AGENT_TIMEOUT_SEC)
         if resp.status_code == 200:
             containers = resp.json().get("containers", [])
             if containers:
                 for c in containers:
-                    requests.post(f"{agent_url}/restart/{c['id']}", timeout=AGENT_TIMEOUT_SEC)
+                    requests.post(f"{url}/restart/{c['name']}", timeout=AGENT_TIMEOUT_SEC)
+                return {"status": "success", "action": "restart", "service": service, "host_ip": url.split("//")[-1].split(":")[0]}
             else:
-                raise Exception(f"No containers found for service '{service}' on agent {agent_url}")
-            return {"status": "success", "action": "restart", "service": service, "host_ip": agent_url.split("//")[1].split(":")[0]}
+                # Try single container restart
+                resp_single = requests.post(f"{url}/restart/{service}", timeout=AGENT_TIMEOUT_SEC)
+                if resp_single.status_code == 200:
+                    return resp_single.json()
+                raise Exception(f"No containers found for service '{service}' on agent {url}")
 
-
-    resp = requests.post(f"{agent_url}/restart/{target_container}", timeout=AGENT_TIMEOUT_SEC)
+    resp = requests.post(f"{url}/restart/{target_container}", timeout=AGENT_TIMEOUT_SEC)
     resp.raise_for_status()
     return resp.json()
 
 
 def execute_scale(agent_url, service, desired_replicas, host_ip):
+    url = get_working_agent_url(agent_url)
     payload = {
         "desired_replicas": desired_replicas,
         "image": SERVICE_IMAGES.get(service, f"{service}:latest"),
     }
-    resp = requests.post(f"{agent_url}/scale/{service}", json=payload, timeout=AGENT_TIMEOUT_SEC)
+    resp = requests.post(f"{url}/scale/{service}", json=payload, timeout=AGENT_TIMEOUT_SEC)
     resp.raise_for_status()
 
     desired_state_col.update_one(
@@ -89,23 +161,23 @@ def process_pending_actions():
         host_ip = doc.get("host_ip")
         agent_url = doc.get("agent_url") or agent_url_for(host_ip)
 
-        if not agent_url:
-            logger.error("No agent_url/host_ip on action doc for %s, cannot execute", service)
-            mark(doc["_id"], "FAILED", error="missing host_ip/agent_url on action document")
-            continue
-
         try:
-            if action == "TARGETED_RESTART":
-                result = execute_restart(agent_url, service, doc.get("target_container"))
+            if action in ("TARGETED_RESTART", "RESTART"):
+                target = doc.get("target_container") or service
+                result = execute_restart(agent_url, service, target)
             elif action == "GLOBAL_RESTART":
                 result = execute_restart(agent_url, service, target_container=service)
-            elif action == "SCALE_UP":
+            elif action in ("SCALE_UP", "SCALE"):
                 data = desired_state_col.find_one({"service": service})
-                desired_replicas = data["desired_replicas"] if data else 3
+                desired_replicas = doc.get("desired_replicas") or (data["desired_replicas"] if data else 3)
                 result = execute_scale(agent_url, service, desired_replicas, host_ip=host_ip)
             elif action == "SCALE_DOWN":
-                mark(doc["_id"], "SUCCESS")
-                continue  # No action needed; desired_state already reflects the scale-down
+                data = desired_state_col.find_one({"service": service})
+                desired_replicas = doc.get("desired_replicas") or 1
+                result = execute_scale(agent_url, service, desired_replicas, host_ip=host_ip)
+            elif action == "ESCALATE_ON_CALL":
+                send_escalation_email(service, doc)
+                result = {"status": "success", "escalated": True, "recipient": DEFAULT_ESCALATION_EMAIL}
             else:
                 logger.warning("Unknown action type '%s' for %s, skipping", action, service)
                 mark(doc["_id"], "FAILED", error="unknown action type")

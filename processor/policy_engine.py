@@ -134,14 +134,14 @@ class PolicyEngine:
 
     def decide_action(
         self, service, risk, top_container, host_ip, traffic_delta,
-        decision_source="Hybrid", decision_reason=""
+        decision_source="Hybrid", decision_reason="", experiment_id=None
     ):
         """
         Decide and record recovery action. Never executes anything.
 
         Policy logic (in order):
           1. Guard: no host_ip → can't target anything
-          2. Repeated failure escalation → SCALE_UP
+          2. Repeated failure escalation → ESCALATE_ON_CALL
           3. High traffic load spike     → SCALE_UP
           4. Known bad container         → TARGETED_RESTART
           5. Unknown container           → GLOBAL_RESTART
@@ -153,7 +153,7 @@ class PolicyEngine:
             logger.error("No host_ip for %s — cannot dispatch action", service)
             self._record_action(
                 service, "NO_HOST_KNOWN", top_container, host_ip,
-                "FAILED", decision_source, "host_ip missing"
+                "FAILED", decision_source, "host_ip missing", experiment_id=experiment_id
             )
             return "NO_HOST_KNOWN"
 
@@ -161,7 +161,7 @@ class PolicyEngine:
         # restarts, escalate to SCALE_UP instead of restarting again
         recent_restarts = self._recent_restart_count(service)
         if recent_restarts >= REPEATED_FAILURE_N:
-            action = "SCALE_UP"
+            action = "ESCALATE_ON_CALL"
             decision_reason = (
                 f"{decision_reason} | escalated: "
                 f"{recent_restarts} restarts in {REPEATED_FAILURE_MIN}min"
@@ -179,7 +179,7 @@ class PolicyEngine:
 
         self._record_action(
             service, action, top_container, host_ip,
-            "PENDING", decision_source, decision_reason
+            "PENDING", decision_source, decision_reason, experiment_id=experiment_id
         )
         return action
 
@@ -187,7 +187,7 @@ class PolicyEngine:
 
     def _record_action(
         self, service, action, target_container, host_ip,
-        status, decision_source, decision_reason
+        status, decision_source, decision_reason, experiment_id=None
     ):
         """
         Write recovery_action document to MongoDB.
@@ -214,6 +214,7 @@ class PolicyEngine:
             # New fields — audit and MTTR
             "decision_source":  decision_source,
             "decision_reason":  decision_reason,
+            "experiment_id":     experiment_id,
             "mttr_ms":          None,   # filled by Controller on SUCCESS
             "execution_ms":     None,   # filled by Controller
         }

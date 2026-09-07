@@ -14,6 +14,8 @@ const CONTAINER_ID =
   process.env.CONTAINER_ID || process.argv[3] || HOSTNAME;
 const COLLECTOR_URL = process.env.COLLECTOR_URL || "http://localhost:5001/logs";
 
+let resolvedHostIpCache = process.env.HOST_IP || HOSTNAME;
+
 // Port for the fault-injection API.
 // Override via INJECTION_API_PORT env var if needed.
 // Does NOT conflict with Collector (5001), agent (8000),
@@ -40,6 +42,7 @@ async function resolveHostIp() {
     );
     if (ipResp.data) {
       console.log(`📍 Resolved host_ip from EC2 metadata: ${ipResp.data}`);
+      resolvedHostIpCache = ipResp.data;
       return ipResp.data;
     }
   } catch (err) {
@@ -49,11 +52,13 @@ async function resolveHostIp() {
   // Tier 2: explicit override (used in docker-compose for local demo)
   if (process.env.HOST_IP) {
     console.log(`📍 Resolved host_ip from HOST_IP env var: ${process.env.HOST_IP}`);
+    resolvedHostIpCache = process.env.HOST_IP;
     return process.env.HOST_IP;
   }
 
   // Tier 3: last resort, never blocks startup
   console.warn(`⚠️  Could not resolve EC2 metadata or HOST_IP env var, falling back to hostname: ${HOSTNAME}`);
+  resolvedHostIpCache = HOSTNAME;
   return HOSTNAME;
 }
 
@@ -63,17 +68,98 @@ async function resolveHostIp() {
 let FAILURE_MODE = false;
 let LATENCY_SPIKE = false;
 
+// Extended experiment-driven fault state
+let EXTENDED_FAULT = {
+  experiment_id: null,
+  fault_type: "NORMAL",
+  intensity: 0.0,
+  latency_ms: 0,
+  active: false,
+};
+let faultAutoStopTimer = null;
+let trafficSpikeInterval = null;
+
+function setExtendedFault(config) {
+  if (faultAutoStopTimer) clearTimeout(faultAutoStopTimer);
+  if (trafficSpikeInterval) clearInterval(trafficSpikeInterval);
+
+  EXTENDED_FAULT = {
+    experiment_id: config.experiment_id || null,
+    fault_type: config.fault_type || "NORMAL",
+    intensity: config.intensity || 0.0,
+    latency_ms: config.latency_ms || 0,
+    active: config.fault_type && config.fault_type !== "NORMAL",
+  };
+
+  const duration_sec = config.duration_sec || 60;
+
+  if (EXTENDED_FAULT.fault_type === "TRAFFIC_SPIKE" && EXTENDED_FAULT.active) {
+    // Generate extra request volume dynamically based on intensity
+    const intervalMs = Math.max(20, Math.floor(100 / (config.intensity || 1.0)));
+    trafficSpikeInterval = setInterval(() => {
+      if (EXTENDED_FAULT.active) sendLog(resolvedHostIpCache);
+    }, intervalMs);
+  }
+
+  if (EXTENDED_FAULT.active && duration_sec > 0) {
+    faultAutoStopTimer = setTimeout(() => {
+      console.log(`⏰ Fault experiment ${EXTENDED_FAULT.experiment_id} auto-expired`);
+      clearExtendedFault();
+    }, duration_sec * 1000);
+  }
+
+  console.log(`⚡ EXTENDED FAULT SET: ${EXTENDED_FAULT.fault_type} (Intensity: ${EXTENDED_FAULT.intensity}, Latency: ${EXTENDED_FAULT.latency_ms}ms)`);
+}
+
+function clearExtendedFault() {
+  if (faultAutoStopTimer) clearTimeout(faultAutoStopTimer);
+  if (trafficSpikeInterval) clearInterval(trafficSpikeInterval);
+
+  EXTENDED_FAULT = {
+    experiment_id: null,
+    fault_type: "NORMAL",
+    intensity: 0.0,
+    latency_ms: 0,
+    active: false,
+  };
+  console.log(`🧹 EXTENDED FAULT CLEARED — Restored to NORMAL state`);
+}
+
 function generateLog(hostIp) {
+  const effectiveHostIp = hostIp || resolvedHostIpCache || process.env.HOST_IP || HOSTNAME;
   let level = "INFO";
   let response_time = Math.floor(Math.random() * 100) + 50; // Normal: 50-150ms
 
   const rand = Math.random();
 
+  if (EXTENDED_FAULT.active) {
+    switch (EXTENDED_FAULT.fault_type) {
+      case "ERROR_INJECTION": {
+        const errProb = EXTENDED_FAULT.intensity || 0.2;
+        const warnProb = errProb * 0.5;
+        if (rand < errProb) level = "ERROR";
+        else if (rand < errProb + warnProb) level = "WARN";
+        break;
+      }
+      case "LATENCY_SPIKE": {
+        response_time += (EXTENDED_FAULT.latency_ms || 1000);
+        break;
+      }
+      case "SERVICE_FAILURE": {
+        level = "ERROR";
+        response_time += 5000;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   if (FAILURE_MODE) {
     if (rand < 0.3) level = "ERROR";
     else if (rand < 0.5) level = "WARN";
     response_time += 400;
-  } else {
+  } else if (!EXTENDED_FAULT.active) {
     if (rand < 0.02) level = "ERROR";
     else if (rand < 0.05) level = "WARN";
   }
@@ -85,7 +171,7 @@ function generateLog(hostIp) {
   return {
     service: SERVICE_NAME,
     container_id: CONTAINER_ID,   // used by log_processor.py for targeted restarts
-    host_ip: hostIp,              // used by controller.py to locate the right agent
+    host_ip: effectiveHostIp,     // used by controller.py to locate the right agent
     hostname: HOSTNAME,
     level,
     response_time,
@@ -112,46 +198,19 @@ async function sendLog(hostIp) {
 }
 
 // ---------------- FAULT INJECTION API ----------------
-// Minimal HTTP server using Node's built-in `http` module — zero new
-// dependencies. Runs on INJECTION_API_PORT (default 5002).
-//
-// Endpoints:
-//
-//   POST /inject/failure
-//     Body (JSON, all fields optional):
-//       { "failure_mode": true|false, "latency_spike": true|false }
-//     Omitting a field leaves that mode unchanged.
-//     Example — enable both:   {"failure_mode": true, "latency_spike": true}
-//     Example — disable both:  {"failure_mode": false, "latency_spike": false}
-//     Example — toggle only errors: {"failure_mode": true}
-//
-//   GET /inject/state
-//     Returns current fault-injection state, no side effects.
-//
-// Both endpoints return the same JSON shape:
-//   {
-//     "service": "auth-service",
-//     "container_id": "auth-service",
-//     "failure_mode": false,
-//     "latency_spike": false,
-//     "effects": {
-//       "error_rate": "~30% (30% ERROR, 20% WARN) [ACTIVE]" | "~2% (normal)",
-//       "latency_added_ms": "1000–3000ms extra [ACTIVE]" | "none"
-//     }
-//   }
-
 function stateResponse() {
   return JSON.stringify({
     service: SERVICE_NAME,
     container_id: CONTAINER_ID,
     failure_mode: FAILURE_MODE,
     latency_spike: LATENCY_SPIKE,
+    extended_fault: EXTENDED_FAULT,
     effects: {
-      error_rate: FAILURE_MODE
-        ? "~30% ERROR / 20% WARN + 400ms base latency [ACTIVE]"
+      error_rate: FAILURE_MODE || EXTENDED_FAULT.fault_type === "ERROR_INJECTION" || EXTENDED_FAULT.fault_type === "SERVICE_FAILURE"
+        ? "[ACTIVE] Elevated Error Rate"
         : "~2% ERROR / 3% WARN (normal)",
-      latency_added_ms: LATENCY_SPIKE
-        ? "1000–3000ms extra [ACTIVE]"
+      latency_added_ms: LATENCY_SPIKE || EXTENDED_FAULT.fault_type === "LATENCY_SPIKE" || EXTENDED_FAULT.fault_type === "SERVICE_FAILURE"
+        ? "[ACTIVE] Increased Latency"
         : "none",
     },
   }, null, 2);
@@ -168,6 +227,32 @@ function startInjectionApi() {
       return;
     }
 
+    // ── POST /fault/start ─────────────────────────────────────────────
+    if (method === "POST" && url === "/fault/start") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        try {
+          const payload = body.trim() ? JSON.parse(body) : {};
+          setExtendedFault(payload);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(stateResponse());
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        }
+      });
+      return;
+    }
+
+    // ── POST /fault/stop ──────────────────────────────────────────────
+    if (method === "POST" && url === "/fault/stop") {
+      clearExtendedFault();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(stateResponse());
+      return;
+    }
+
     // ── POST /inject/failure ──────────────────────────────────────────
     if (method === "POST" && url === "/inject/failure") {
       let body = "";
@@ -176,8 +261,6 @@ function startInjectionApi() {
         try {
           const payload = body.trim() ? JSON.parse(body) : {};
 
-          // Only update modes that were explicitly provided in the request.
-          // Omitting a key leaves the current value untouched.
           if (typeof payload.failure_mode === "boolean") {
             FAILURE_MODE = payload.failure_mode;
             console.log(`🌐 API → FAILURE_MODE: ${FAILURE_MODE ? "ON" : "OFF"}`);
@@ -185,6 +268,10 @@ function startInjectionApi() {
           if (typeof payload.latency_spike === "boolean") {
             LATENCY_SPIKE = payload.latency_spike;
             console.log(`🌐 API → LATENCY_SPIKE: ${LATENCY_SPIKE ? "ON" : "OFF"}`);
+          }
+
+          if (payload.fault_type) {
+            setExtendedFault(payload);
           }
 
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -203,7 +290,9 @@ function startInjectionApi() {
       error: "Not found",
       available: [
         "GET  /inject/state",
-        "POST /inject/failure  body: {failure_mode?: bool, latency_spike?: bool}",
+        "POST /fault/start",
+        "POST /fault/stop",
+        "POST /inject/failure",
       ],
     }));
   });
@@ -260,6 +349,7 @@ process.on("SIGTERM", shutdown);
 // ---------------- MAIN ----------------
 async function main() {
   const hostIp = await resolveHostIp();
+  resolvedHostIpCache = hostIp;
 
   console.log(`🚀 Starting ${SERVICE_NAME} | container_id=${CONTAINER_ID} | host_ip=${hostIp}`);
   setupKeyboardControls();
